@@ -1,0 +1,198 @@
+#!/bin/sh
+
+cxx_default="g++"
+cxxflags_default="--std=c++11 -Wall -O3 -DNDEBUG"
+ar_default="ar"
+pkgconfig_default="pkg-config"
+
+libname="imgui"
+imguidir="imgui"
+
+prefix="/usr/local"
+libdir=; libdir_default='$prefix/lib'
+incdir=; incdir_default='$prefix/include/$libname'
+pkgconfigdir=; pkgconfigdir_default='$libdir/pkgconfig'
+
+enable_glfw=auto
+enable_sdl2=auto
+enable_sdl3=auto
+enable_opengl3=auto
+enable_vulkan=auto
+
+show_help() {
+    cat <<EOF
+Usage: $0 [OPTION]...
+
+Options:
+  --imguidir=DIR        use imgui source from DIR [$imguidir]
+  --prefix=PREFIX       main installation prefix [$prefix]
+  --libname=LIBNAME     install the library as LIBNAME [$libname]
+  --help                show this help and exit
+
+Fine tuning of the installation:
+  --libdir=DIR          install library in DIR [$libdir_default]
+  --incdir=DIR          install header files in DIR [$incdir_default]
+  --pkgconfigdir=DIR    install pkg-config file in DIR [$pkgconfigdir_default]
+
+Enable or disable backends (overrides autodetection):
+  --enable-glfw     --disable-glfw      GLFW backend [$enable_glfw]
+  --enable-sdl2     --disable-sdl2      SDL2 backend [$enable_sdl2]
+  --enable-sdl3     --disable-sdl3      SDL3 backend [$enable_sdl3]
+  --enable-opengl3  --disable-opengl3   OpenGL (opengl3) backend [$enable_opengl3]
+  --enable-vulkan   --disable-vulkan    Vulkan backend [$enable_vulkan]
+
+Toolchain settings from environment variables:
+  CXX                   C++ compiler [$cxx_default]
+  CXXFLAGS              flags when compiling C++ [$cxxflags_default]
+  AR                    archive tool [$ar_default]
+  PKG_CONFIG            pkg-config tool [$pkgconfig_default]
+
+Defaults are shown in brackets.
+EOF
+    exit 0
+}
+
+#
+# Parse arguments
+#
+for arg; do
+    case "$arg" in
+        --imguidir=*) imguidir=${arg#*=} ;;
+        --prefix=*) prefix=${arg#*=} ;;
+        --libname=*) libname=${arg#*=} ;;
+        --libdir=*) libdir=${arg#*=} ;;
+        --incdir=*) incdir=${arg#*=} ;;
+        --pkgconfigdir=*) pkgconfigdir=${arg#*=} ;;
+
+        --enable-glfw) enable_glfw=yes ;;
+        --disable-glfw) enable_glfw=no ;;
+        --enable-sdl2) enable_sdl2=yes ;;
+        --disable-sdl2) enable_sdl2=no ;;
+        --enable-sdl3) enable_sdl3=yes ;;
+        --disable-sdl3) enable_sdl3=no ;;
+        --enable-opengl3) enable_opengl3=yes ;;
+        --disable-opengl3) enable_opengl3=no ;;
+        --enable-vulkan) enable_vulkan=yes ;;
+        --disable-vulkan) enable_vulkan=no ;;
+
+        --help) show_help ;;
+        *) echo "Unknown option: $arg\nTry '$0 --help' for more information."; exit 1 ;;
+    esac
+done
+
+# directories with variables in defaults
+eval libdir=\${libdir:-$libdir_default}
+eval incdir=\${incdir:-$incdir_default}
+eval pkgconfigdir=\${pkgconfigdir:-$pkgconfigdir_default}
+
+# parameters from environment
+cxx="${CXX:-$cxx_default}"
+cxxflags="${CXXFLAGS:-$cxxflags_default}"
+ar="${AR:-$ar_default}"
+pkgconfig="${PKG_CONFIG:-$pkgconfig_default}"
+
+#
+# check imgui source
+#
+if [ ! -f "$imguidir/imgui.h" ]; then
+    echo "The imgui source seems to be missing."
+    echo "Run e.g. 'git clone --depth=1 -b master https://github.com/ocornut/imgui.git $imguidir' and try again."
+    exit 1
+fi
+
+imgui_version=$(awk -F'"' '/#define IMGUI_VERSION[^_]/ {print $2; exit}' $imguidir/imgui.h) || exit 1
+if [ -z "$imgui_version" ]; then
+    echo "Warning: did not find imgui version"
+    imgui_version=0
+fi
+
+#
+# Select backends
+#
+backends="null"
+needed_pkgs=""
+
+pkg_exists() {
+    echo -n "checking if $1 is available... "
+    if $pkgconfig --exists "$1" 2>/dev/null; then
+        echo "yes"; return 0
+    else
+        echo "no"; return 1
+    fi
+}
+
+if [ "$enable_glfw" = "yes" ] || { [ "$enable_glfw" = "auto" ] && pkg_exists glfw3; } ; then
+    needed_pkgs="$needed_pkgs glfw3";
+    backends="$backends glfw"
+fi
+if [ "$enable_sdl2" = "yes" ] || { [ "$enable_sdl2" = "auto" ] && pkg_exists sdl2; } ; then
+    needed_pkgs="$needed_pkgs sdl2";
+    backends="$backends sdl2"
+fi
+if [ "$enable_sdl3" = "yes" ] || { [ "$enable_sdl3" = "auto" ] && pkg_exists sdl3; } ; then
+    needed_pkgs="$needed_pkgs sdl3";
+    backends="$backends sdl3"
+fi
+if [ "$enable_opengl3" = "yes" ] || { [ "$enable_opengl3" = "auto" ] && pkg_exists gl; } ; then
+    needed_pkgs="$needed_pkgs gl";
+    backends="$backends opengl3"
+fi
+if [ "$enable_vulkan" = "yes" ] || { [ "$enable_vulkan" = "auto" ] && pkg_exists vulkan; } ; then
+    needed_pkgs="$needed_pkgs vulkan";
+    backends="$backends vulkan"
+fi
+backends="${backends# }"
+needed_pkgs="${needed_pkgs# }"
+
+extra_cflags=""
+if [ -n "$needed_pkgs" ]; then
+    extra_cflags="$extra_cflags $($pkgconfig --cflags $needed_pkgs)" || exit 1
+fi
+extra_cflags="${extra_cflags# }"
+
+#
+# Write pkg-config file
+#
+pcfile=$libname.pc
+cat > $pcfile <<EOF
+libdir=$libdir
+includedir=$incdir
+
+Name: $libname
+Description: Dear ImGui static library
+Version: $imgui_version
+Libs: -L\${libdir} -l$libname
+Cflags: -I\${includedir}
+EOF
+
+#
+# Write make config
+#
+config_mk="config.mk"
+cat > $config_mk <<EOF
+# generated by: $0 $*
+CXX             = $cxx
+AR              = $ar
+CXXFLAGS        = $cxxflags
+EXTRA_CFLAGS    = $extra_cflags
+BACKENDS        = $backends
+IMGUIDIR        = $imguidir
+LIBNAME         = $libname
+PCFILE          = $pcfile
+LIBDIR          = $libdir
+INCDIR          = $incdir
+PKGCONFIGDIR    = $pkgconfigdir
+EOF
+
+cat << EOF
+
+Configuration:
+  ImGui version:          $imgui_version
+  Enabled backends:       $backends
+  Installation prefix:    $prefix
+
+Configuration written to $config_mk.
+
+You can now run 'make' and 'make install', afterwards you should be able to use the library with
+'PKG_CONFIG_PATH=$pkgconfigdir $pkgconfig --cflags --libs $libname'.
+EOF
